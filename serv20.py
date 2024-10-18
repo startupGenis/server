@@ -1,53 +1,87 @@
+# manager_server.py
 from flask import Flask, request, jsonify, redirect
-#from flask_cors import CORS  # Importando Flask-CORS
+from flask_cors import CORS
 import logging
+from datetime import datetime
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 app = Flask(__name__)
-#CORS(app)  # Habilitando CORS para o aplicativo Flask
+CORS(app)
 
-# Configuração de autenticação
-CHAVE_AUTENTICACAO = 'chave_secreta'
+# Configuration
+class Config:
+    AUTH_KEY = os.getenv('AUTH_KEY', 'chave_secreta')  # Better to use environment variable
+    PORT = int(os.getenv('PORT', 5000))
+    HOST = '0.0.0.0'
 
-# Variáveis globais para armazenar o IP e a porta do servidor local
-ip_atualizado = None
-porta_atualizada = None
+# State management
+class DNSState:
+    def __init__(self):
+        self.client_ip = None
+        self.client_port = None
+        self.last_update = None
 
-# Configuração de logging
-logging.basicConfig(level=logging.INFO)
+    def update(self, ip, port):
+        self.client_ip = ip
+        self.client_port = port
+        self.last_update = datetime.now()
 
-@app.route('/atualizar_dns', methods=['POST'])
-def atualizar_dns():
-    global ip_atualizado, porta_atualizada
+dns_state = DNSState()
 
-    # Verifica a chave de autenticação
-    chave = request.headers.get('X-Auth-Key')
-    if chave != CHAVE_AUTENTICACAO:
-        logging.warning("Tentativa de acesso com chave de autenticação inválida")
-        return jsonify({'error': 'Chave de autenticação inválida'}), 403
+# Middleware for authentication
+def require_auth(f):
+    def decorated(*args, **kwargs):
+        auth_key = request.headers.get('X-Auth-Key')
+        if auth_key != Config.AUTH_KEY:
+            logging.warning("Invalid authentication attempt")
+            return jsonify({'error': 'Invalid authentication key'}), 403
+        return f(*args, **kwargs)
+    return decorated
 
-    # Obtém o IP e porta do payload da solicitação
-    dados = request.json
-    ip_atualizado = dados.get('ip')
-    porta_atualizada = dados.get('porta')
+@app.route('/api/update-dns', methods=['POST'])
+@require_auth
+def update_dns():
+    try:
+        data = request.get_json()
+        ip = data.get('ip')
+        port = data.get('port')
 
-    # Logando a solicitação recebida
-    if ip_atualizado and porta_atualizada:
-        logging.info(f"Recebida solicitação de atualização de IP: {ip_atualizado}:{porta_atualizada}")
-    else:
-        logging.error("Dados inválidos recebidos. IP ou porta faltando.")
-        return jsonify({'error': 'Dados inválidos. IP ou porta faltando.'}), 400
+        if not ip or not port:
+            return jsonify({'error': 'Missing IP or port'}), 400
 
-    return jsonify({'status': 'IP atualizado com sucesso', 'ip': ip_atualizado, 'porta': porta_atualizada})
+        dns_state.update(ip, port)
+        logging.info(f"DNS updated: {ip}:{port}")
+        
+        return jsonify({
+            'status': 'success',
+            'ip': ip,
+            'port': port,
+            'timestamp': dns_state.last_update.isoformat()
+        })
+
+    except Exception as e:
+        logging.error(f"Error updating DNS: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/')
 def index():
-    if ip_atualizado and porta_atualizada:
-        # Redireciona o usuário para o servidor local
-        logging.info(f"Redirecionando para o servidor local: http://{ip_atualizado}:{porta_atualizada}")
-        return redirect(f"http://{ip_atualizado}:{porta_atualizada}")
-    else:
-        logging.warning("Nenhum IP atualizado encontrado para redirecionamento.")
-        return "Nenhum IP atualizado encontrado.", 404
+    if dns_state.client_ip and dns_state.client_port:
+        target_url = f"http://{dns_state.client_ip}:{dns_state.client_port}"
+        logging.info(f"Redirecting to: {target_url}")
+        return redirect(target_url)
+    return "No active client registered", 404
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+    
+    logging.info("Starting DNS Manager Server")
+    app.run(host=Config.HOST, port=Config.PORT)
+
